@@ -120,6 +120,56 @@ def gmsh_ring(model: gmsh.model, name: str) -> gmsh.model:
     model.setPhysicalName(3, 1, "Mesh volume")
     return model
 
+def create_mesh(comm: MPI.Comm, model: gmsh.model, name: str, filename: str, mode: str):
+    """Create a DOLFINx from a Gmsh model and output to file.
+
+    Args:
+        comm: MPI communicator top create the mesh on.
+        model: Gmsh model.
+        name: Name (identifier) of the mesh to add.
+        filename: XDMF filename.
+        mode: XDMF file mode. "w" (write) or "a" (append).
+    """
+    mesh_data = gmshio.model_to_mesh(model, comm, rank=0)
+    mesh_data.mesh.name = name
+    if mesh_data.cell_tags is not None:
+        mesh_data.cell_tags.name = f"{name}_cells"
+    if mesh_data.facet_tags is not None:
+        mesh_data.facet_tags.name = f"{name}_facets"
+    if mesh_data.edge_tags is not None:
+        mesh_data.edge_tags.name = f"{name}_edges"
+    if mesh_data.vertex_tags is not None:
+        mesh_data.vertex_tags.name = f"{name}_vertices"
+    with XDMFFile(mesh_data.mesh.comm, filename, mode) as file:
+        mesh_data.mesh.topology.create_connectivity(2, 3)
+        mesh_data.mesh.topology.create_connectivity(1, 3)
+        mesh_data.mesh.topology.create_connectivity(0, 3)
+        file.write_mesh(mesh_data.mesh)
+        if mesh_data.cell_tags is not None:
+            file.write_meshtags(
+                mesh_data.cell_tags,
+                mesh_data.mesh.geometry,
+                geometry_xpath=f"/Xdmf/Domain/Grid[@Name='{name}']/Geometry",
+            )
+        if mesh_data.facet_tags is not None:
+            file.write_meshtags(
+                mesh_data.facet_tags,
+                mesh_data.mesh.geometry,
+                geometry_xpath=f"/Xdmf/Domain/Grid[@Name='{name}']/Geometry",
+            )
+        if mesh_data.edge_tags is not None:
+            file.write_meshtags(
+                mesh_data.edge_tags,
+                mesh_data.mesh.geometry,
+                geometry_xpath=f"/Xdmf/Domain/Grid[@Name='{name}']/Geometry",
+            )
+        if mesh_data.vertex_tags is not None:
+            file.write_meshtags(
+                mesh_data.vertex_tags,
+                mesh_data.mesh.geometry,
+                geometry_xpath=f"/Xdmf/Domain/Grid[@Name='{name}']/Geometry",
+            )
+
 gmsh.initialize()
 gmsh.option.setNumber("General.Terminal", 0)
 
