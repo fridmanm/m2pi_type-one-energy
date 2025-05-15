@@ -1,0 +1,66 @@
+"""
+mesh_and_plot_torus.py
+
+1) Create & mesh a torus with Gmsh
+2) Save to torus.msh
+3) Load with meshio
+4) Visualize in PyVista
+"""
+
+import gmsh
+import meshio
+import numpy as np
+import pyvista as pv
+
+#    pip install gmsh meshio pyvista
+
+# Initialize Gmsh
+gmsh.initialize()
+gmsh.model.add("torus")
+
+# Define torus geometry parameters
+R = 1      # major radius
+r = 0.3      # minor radius
+
+# Create the torus (OpenCASCADE kernel)
+torus_tag = gmsh.model.occ.addTorus(0, 0, 0, R, r)
+gmsh.model.occ.synchronize()
+
+# Set a uniform target element size
+gmsh.option.setNumber("Mesh.MeshSizeMin", 0.1)
+gmsh.option.setNumber("Mesh.MeshSizeMax", 0.1)
+
+# Generate a 3D mesh
+gmsh.model.mesh.generate(3)
+
+# Write mesh to file
+mesh_file = "torus.msh"
+gmsh.write(mesh_file)
+
+# Cleanup Gmsh
+gmsh.finalize()
+
+# —————————————————————————————
+
+# Read the mesh back in with meshio
+mesh = meshio.read(mesh_file)
+
+# Convert to a PyVista UnstructuredGrid
+if "tetra" in mesh.cells_dict:
+    # extract tet connectivity
+    cells = mesh.cells_dict["tetra"]
+    n_tets = cells.shape[0]
+    # build the VTK-style connectivity array:
+    # [4, i0, i1, i2, i3,  4, j0, j1, j2, j3, ...]
+    conn = np.hstack([ np.full((n_tets,1), 4, dtype=int), cells ]).flatten()
+    cell_types = np.full(n_tets, pv.CellType.TETRA)
+    grid = pv.UnstructuredGrid(conn, cell_types, mesh.points)
+else:
+    # fallback (e.g. surface-only meshes)
+    grid = pv.wrap(mesh)
+
+# Plot interactively
+plotter = pv.Plotter()
+plotter.add_mesh(grid, show_edges=True)
+plotter.add_axes()    # xyz axes widget
+plotter.show(title="Torus Mesh")
