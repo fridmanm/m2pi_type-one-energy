@@ -1,4 +1,4 @@
-#previous part of the code is the same, I just added boundry conditions around line 25 onwward, not sure if it works after discussing with other team members
+#previous part of the code is the same, I just added boundry conditions around line 25 onwward, not sure if it works after discussing with other team members 
 
 
 from mpi4py import MPI
