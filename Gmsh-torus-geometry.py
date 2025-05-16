@@ -31,7 +31,7 @@ if pyvista.OFF_SCREEN:
 transparent = False
 figsize = 800
 
-def create_torus_mesh():
+def create_torus_mesh(resolution):
     gmsh.initialize()
     gmsh.model.add("torus")
 
@@ -40,6 +40,7 @@ def create_torus_mesh():
 
     tag = gmsh.model.occ.addTorus(0, 0, 0, R, r)
     gmsh.model.occ.synchronize()
+    gmsh.model.mesh.setSize([(0,tag)],resolution)
     gmsh.model.addPhysicalGroup(3, [tag], 1)
 
     gmsh.model.mesh.generate(3)
@@ -47,7 +48,7 @@ def create_torus_mesh():
     gmsh.finalize()
     return mesh
 
-msh = create_torus_mesh()
+msh = create_torus_mesh(resolution=0.15)
 R = 1.0  # big radius (center to middle of tube)
 a = 1.0/3.0  # small radius (tube thickness)
 plotter = pyvista.Plotter()
