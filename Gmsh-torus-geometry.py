@@ -1,35 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Thu May 15 16:13:23 2025
+Created on Tue May 20 12:09:44 2025
 
-@author: mitja
+@author: shirinalimirzaei
 """
 
 from mpi4py import MPI
-
 import numpy as np
-
 import dolfinx.plot as plot
-from dolfinx.fem import Function, functionspace, dirichletbc
-from dolfinx.mesh import CellType, compute_midpoints, create_unit_cube, create_unit_square, meshtags,exterior_facet_indices, Mesh, create_mesh, compute_incident_entities
+from dolfinx.fem import Function, functionspace
+from dolfinx.mesh import exterior_facet_indices, compute_incident_entities
 from dolfinx.io import gmshio
 import gmsh
+import pyvista
 
-try:
-    import pyvista
-except ModuleNotFoundError:
-    print("pyvista is required for this demo")
-    exit(0)
-
-# If environment variable PYVISTA_OFF_SCREEN is set to true save a png
-# otherwise create interactive plot
+# Initialize pyvista
 if pyvista.OFF_SCREEN:
     pyvista.start_xvfb(wait=0.1)
-
-# Set some global options for all plots
-transparent = False
-figsize = 800
 
 def create_torus_mesh(resolution):
     gmsh.initialize()
@@ -40,7 +28,7 @@ def create_torus_mesh(resolution):
 
     tag = gmsh.model.occ.addTorus(0, 0, 0, R, r)
     gmsh.model.occ.synchronize()
-    gmsh.model.mesh.setSize([(0,tag)],resolution)
+    gmsh.model.mesh.setSize([(0,tag)], resolution)
     gmsh.model.addPhysicalGroup(3, [tag], 1)
 
     gmsh.model.mesh.generate(3)
@@ -48,104 +36,80 @@ def create_torus_mesh(resolution):
     gmsh.finalize()
     return mesh
 
+# Create mesh
 msh = create_torus_mesh(resolution=0.15)
 R = 1.0  # big radius (center to middle of tube)
 a = 1.0/3.0  # small radius (tube thickness)
+
+# Create plotter
 plotter = pyvista.Plotter()
 plotter.add_text("Torus Mesh and Vector Field", position="upper_edge", font_size=14, color="black")
 
+# Get boundary facets and vertices
 tdim = msh.topology.dim
 fdim = tdim - 1
 msh.topology.create_connectivity(fdim, tdim)
 boundary_facets = exterior_facet_indices(msh.topology)
-boundary_vertices = compute_incident_entities(msh.topology, boundary_facets, msh.topology.dim-1, 0)
+boundary_vertices = compute_incident_entities(msh.topology, boundary_facets, fdim, 0)
 
-pyvista_cells, cell_types, x = plot.vtk_mesh(msh)
-grid = pyvista.UnstructuredGrid(pyvista_cells, cell_types, x)
-
-plotter.add_mesh(grid, style="wireframe", line_width=2, color="black")
+# Create mesh for visualization
 
 
-# Define Nedelec function space and vector field
-V = functionspace(msh, ("N1curl", 2))
-u = Function(V, dtype=np.float64)
-
+# Define normal vector function
 def normal_vector(x):
-    # Parametric equations for the torus
     theta = np.arctan2(x[1], x[0])
-    #if x[0]**2+x[1]**2>=R:
-    #    phi = np.arcsin(x[2] / a)
-    #else:
-    #    phi = np.pi - np.arcsin(x[2] / a)
-    #phi=np.arccos((x[0]**2+x[1]**2+x[2]**2+R**2)/(2*R*np.sqrt(x[0]**2+x[1]**2)))
     phi = np.arcsin(x[2] / a)
-    phi[np.where(x[0]**2+x[1]**2<R)[0]] = np.pi - np.arcsin(x[2][np.where(x[0]**2+x[1]**2<R)[0]] / a)
+    
+    # For points inside the torus (inner surface)
+    inner_mask = (x[0]**2 + x[1]**2) < R
+    phi[inner_mask] = np.pi - np.arcsin(x[2][inner_mask] / a)
+    
     # Normal vector calculation
     nx = np.cos(theta) * np.cos(phi)
     ny = np.sin(theta) * np.cos(phi)
     nz = np.sin(phi)
     
+    # Normalize the vectors
+    norm = np.sqrt(nx**2 + ny**2 + nz**2)
+    nx /= norm
+    ny /= norm
+    nz /= norm
+    
     return (nx, ny, nz)
 
-#u.interpolate(lambda x: (np.cos(np.arcsin(x[2]/a))*np.cos(np.arctan(x[1]/x[0])), np.cos(np.arcsin(x[2]/a))*np.sin(np.arctan(x[1]/x[0])), np.sin(np.arcsin(x[2]/a))))
-u.interpolate(lambda x: normal_vector(x))
-#print(x)
+# Create a function space on the boundary only
+# First, we need to create a boundary mesh
+from dolfinx.mesh import create_submesh
+boundary_mesh, entity_map = create_submesh(msh, fdim, boundary_facets)[:2]
 
-#surf=exterior_facet_indices(msh.topology.create_connectivity(msh.topology.dim, 0))
+# Now define a function space on the boundary mesh
+V_boundary = functionspace(boundary_mesh, ("Lagrange", 1, (msh.geometry.dim,)))
+u_boundary = Function(V_boundary, dtype=np.float64)
 
-# Create a facet mesh to limit the vector field to the surface
-'''
-entities=np.arange(msh.topology.index_map(2).size_local)
+pyvista_cells, cell_types, x = plot.vtk_mesh(boundary_mesh)
+grid = pyvista.UnstructuredGrid(pyvista_cells, cell_types, x)
+plotter.add_mesh(grid, style="wireframe", line_width=2, color="black")
 
-facet_values=np.ones(msh.topology.index_map(2).size_local)
+# Interpolate the normal vector function on the boundary
+u_boundary.interpolate(lambda x: normal_vector(x))
 
-facet_tags = meshtags(msh, 2, entities,facet_values)  # Assuming 2D facets for the surface
-V_facet = functionspace(msh, facet_tags)
+# Visualize the boundary mesh and vector field
+cells, cell_types, boundary_points = plot.vtk_mesh(boundary_mesh)
+boundary_grid = pyvista.UnstructuredGrid(cells, cell_types, boundary_points)
 
+# Get the vector field data
+boundary_grid.point_data["u"] = u_boundary.x.array.reshape(boundary_points.shape[0], 3)
 
-# Define boundary condition for the function space
-def boundary(x):
-    return np.full(x.shape[0], True)  # All points are on the boundary
+# Create glyphs for visualization
+glyphs = boundary_grid.glyph(orient="u", factor=0.1)
 
-# Apply Dirichlet boundary condition
-bc = dirichletbc(u, locate_dofs_geometrically(V, boundary))
-
-# Interpolate to the facet function space for visualization
-u_facet = Function(V_facet, dtype=np.float64)
-u_facet.interpolate(u)
-
-cells, cell_types, x = plot.vtk_mesh(V_facet)
-grid = pyvista.UnstructuredGrid(cells, cell_types, x)
-
-grid.point_data["u"] = u_facet.x.array.reshape(x.shape[0], V_facet.dofmap.index_map_bs)
-glyphs = grid.glyph(orient="u", factor=0.1)
-
-plotter.add_mesh(glyphs)
-'''
-
-#print(u)
-# Interpolate to discontinuous Lagrange for visualization
-
-gdim = msh.geometry.dim
-V0 = functionspace(msh, ("Discontinuous Lagrange", 2, (gdim,)))
-u0 = Function(V0, dtype=np.float64)
-u0.interpolate(u)
-
-cells, cell_types, y = plot.vtk_mesh(V0)
-grid = pyvista.UnstructuredGrid(cells, cell_types, y)
-
-grid.point_data["u"] = u0.x.array.reshape(y.shape[0], V0.dofmap.index_map_bs)
-glyphs = grid.glyph(orient="u", factor=0.1)
-
-plotter.add_mesh(glyphs)
-
-
+plotter.add_mesh(glyphs, color="red")
 
 if pyvista.OFF_SCREEN:
     plotter.screenshot(
         "torus_with_vectors.png",
-        transparent_background=transparent,
-        window_size=[figsize, figsize],
+        transparent_background=False,
+        window_size=[800, 800],
     )
 else:
     plotter.show()
