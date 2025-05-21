@@ -1,0 +1,249 @@
+from dolfinx import fem
+from mpi4py import MPI
+from dolfinx.io import gmshio
+from dolfinx.io import XDMFFile
+from ufl import curl, inner, cross, dx, ds, FacetNormal, TrialFunction, TestFunction, CellDiameter, grad, Coefficient
+from petsc4py import PETSc
+import numpy as np
+import pyvista as pv
+import matplotlib.pyplot as plt
+from dolfinx.fem import form, assemble_scalar, Constant
+from ufl import dot, as_vector
+
+# ================================
+# 1. Read the mesh from Gmsh
+# ================================
+domain, cell_tags, facet_tags = gmshio.read_from_msh("torus.msh", MPI.COMM_WORLD, gdim=3)
+
+# ================================
+# 2. Define Function Space
+# ================================
+V = fem.functionspace(domain, ("N1curl", 1, (domain.topology.dim,)))
+
+# ================================
+# 3. Define Weak Form (Beltrami with Nitsche BC)
+# ================================
+u = TrialFunction(V)
+u0 = Coefficient(V)
+v = TestFunction(V)
+n = FacetNormal(domain)
+mu = 1.0
+gamma = 1000000000.0  # Penalty parameter
+h = CellDiameter(domain)
+
+un = inner(u, n)
+vn = inner(v, n)
+#u_1 = fem.Constant(domain, PETSc.ScalarType((0, 0, 0)))
+
+T = fem.Constant(domain, PETSc.ScalarType((0, 0, 1)))
+
+
+a = (
+    inner(curl(u), curl(v)) * dx
+    - mu**2 * inner(u, v) * dx
+    #- inner(cross(v, u), n) * ds
+   # - inner(cross(n, v), u) * ds
+    #+ gamma /h *  un * vn * ds
+    + gamma /h *  un * vn * ds
+
+)
+
+f = fem.Constant(domain, PETSc.ScalarType((0, 0, 1)))
+L = (
+      inner(f, v) *  dx + gamma/h * inner(v,n) * ds 
+    #- inner(cross(n, u), v) * ds
+    #- inner(cross(n, v), u) * ds
+    #-inner(cross(n, u), v) * ds
+
+)
+
+
+
+
+
+
+"""
+
+
+# works L = (
+    inner(f, v)  *  mu**2 *  dx + gamma/h * inner (v,n) *ds    
+
+
+
+
+
+
+    
+
+a = (
+    inner(curl(u), curl(v)) * dx
+    - mu**2 * inner(u, v) * dx
+    #- inner(cross(v, u), n) * ds
+    #- inner(cross(n, v), u) * ds
+   + gamma /h *  un * vn * ds
+
+)
+
+f = fem.Constant(domain, PETSc.ScalarType((0, 0, 1)))
+L = (
+    inner(f, v) * dx - gamma/h * inner (v,n) * ds  
+    #- inner(cross(n, u), v) * ds
+    #- inner(cross(n, v), u) * ds
+    #-inner(cross(n, u), v) * ds
+
+)
+
+
+"""
+# ================================
+# 4. Solve the Linear Problem
+# ================================
+from dolfinx.fem.petsc import LinearProblem
+problem = LinearProblem(a, L, bcs=[], petsc_options={"ksp_type": "preonly", "pc_type": "lu"})
+uh = problem.solve()
+
+# ================================
+# 5. Check Boundary Condition: B · n ≈ 0
+# ================================
+B_dot_n = inner(uh, n) * ds
+b_normal_integral = assemble_scalar(form(B_dot_n))
+print(f"∫ B · n ds over boundary: {b_normal_integral:.2e}")
+
+B_dot_n_sq = inner(uh, n)**2 * ds
+b_dot_n_sq_integral = assemble_scalar(form(B_dot_n_sq))
+print(f"∫ (B · n)² ds over boundary: {b_dot_n_sq_integral:.2e}")
+
+# ================================
+# 6. Normalize Field in CG Space
+# ================================
+V_cg = fem.functionspace(domain, ("Lagrange", 1, (domain.topology.dim,)))
+uh_cg = fem.Function(V_cg)
+uh_cg.interpolate(uh)
+
+points = V_cg.tabulate_dof_coordinates().reshape(-1, 3)
+target_point = np.array([1.0, 0.0, 0.0])
+distances = np.linalg.norm(points - target_point, axis=1)
+closest_index = np.argmin(distances)
+
+uh_values = uh_cg.x.array.reshape(-1, 3)
+reference_value = uh_values[closest_index, 0]
+
+if abs(reference_value) < 1e-14:
+    raise RuntimeError("Reference value too small to normalize")
+
+uh_values /= reference_value
+print(f"Reference Bx at (1,0,0): {reference_value:.4e}")
+uh_cg.x.array[:] = uh_values.flatten()
+uh_cg.x.scatter_forward()
+
+# ================================
+# 7. Verify Volume Identity: ∫ x · n = 3 * Volume
+# ================================
+one = Constant(domain, PETSc.ScalarType(1.0))
+volume = assemble_scalar(form(one * dx))
+print(f"Volume of domain: {volume:.6f}")
+
+V_scalar = fem.functionspace(domain, ("Lagrange", 1))
+x_fn = fem.Function(V_scalar); x_fn.interpolate(lambda x: x[0])
+y_fn = fem.Function(V_scalar); y_fn.interpolate(lambda x: x[1])
+z_fn = fem.Function(V_scalar); z_fn.interpolate(lambda x: x[2])
+
+vec_x = as_vector((x_fn, y_fn, z_fn))
+x_dot_n_form = dot(vec_x, n) * ds
+x_dot_n_integral = assemble_scalar(form(x_dot_n_form))
+
+print(f"∫ x · n ds over boundary: {x_dot_n_integral:.6f}")
+print(f"3 × Volume: {3*volume:.6f}")
+print(f"Error in identity: {abs(x_dot_n_integral - 3 * volume):.2e}")
+
+# ================================
+# 8. Save Field to File
+# ================================
+with XDMFFile(MPI.COMM_WORLD, "B_solution.xdmf", "w") as xdmf:
+    xdmf.write_mesh(domain)
+    xdmf.write_function(uh_cg)
+
+# ================================
+# 9. Extract Cylindrical Components (B_r, B_phi, B_z)
+# ================================
+vectors = uh_cg.x.array.reshape(-1, 3)
+x, y, z = points[:, 0], points[:, 1], points[:, 2]
+r = np.sqrt(x**2 + y**2)
+r_safe = np.where(r > 1e-14, r, 1.0)
+
+e_r = np.column_stack((x / r_safe, y / r_safe, np.zeros_like(z)))
+e_phi = np.column_stack((-y / r_safe, x / r_safe, np.zeros_like(z)))
+e_z = np.column_stack((np.zeros_like(x), np.zeros_like(y), np.ones_like(z)))
+
+B_r = np.einsum("ij,ij->i", vectors, e_r)
+B_phi = np.einsum("ij,ij->i", vectors, e_phi)
+B_z = vectors[:, 2]
+
+# ================================
+# 10. Visualize Vector Field
+# ================================
+norms = np.linalg.norm(vectors, axis=1)
+normalized_vectors = np.zeros_like(vectors)
+nonzero = norms > 1e-14
+normalized_vectors[nonzero] = (vectors[nonzero].T / norms[nonzero]).T
+
+cloud = pv.PolyData(points)
+cloud["B"] = normalized_vectors
+cloud["B_magnitude"] = np.linalg.norm(vectors, axis=1)
+
+surf = cloud.extract_surface()
+glyphs = surf.glyph(orient="B", factor=0.07)
+
+p = pv.Plotter()
+p.add_mesh(glyphs, color="blue")
+p.add_legend([("Magnetic Field (B)", "blue")])
+p.show()
+
+# Extract a toroidal cross-section near φ ≈ 0 (i.e., y ≈ 0)
+phi = np.arctan2(y, x)
+r = np.sqrt(x**2 + y**2)
+r_safe = np.where(r > 1e-14, r, 1.0)
+
+e_r = np.column_stack((x / r_safe, y / r_safe, np.zeros_like(z)))
+e_phi = np.column_stack((-y / r_safe, x / r_safe, np.zeros_like(z)))
+e_z = np.column_stack((np.zeros_like(x), np.zeros_like(y), np.ones_like(z)))
+
+B_r = np.einsum("ij,ij->i", vectors, e_r)
+B_phi = np.einsum("ij,ij->i", vectors, e_phi)
+B_z = vectors[:, 2]
+# ================================
+# 13. Cross-Section Plots for φ ≈ 0 and φ ≈ π/2
+# ================================
+phi0_mask = np.abs(phi) < 0.2
+phi90_mask = np.abs(phi - np.pi/2) < 0.2
+
+def plot_cross_section(phi_mask, title_suffix, filename_suffix):
+    r_slice = r[phi_mask]
+    z_slice = z[phi_mask]
+    Br_slice = B_r[phi_mask]
+    Bphi_slice = B_phi[phi_mask]
+    Bz_slice = B_z[phi_mask]
+
+    fig, axs = plt.subplots(1, 3, figsize=(18, 5))
+
+    sc1 = axs[0].scatter(r_slice, z_slice, c=Br_slice, cmap="coolwarm", s=50)
+    axs[0].set_title(f"Radial $B_r$ ({title_suffix})")
+    axs[0].set_xlabel("r"); axs[0].set_ylabel("z")
+    plt.colorbar(sc1, ax=axs[0])
+
+    sc2 = axs[1].scatter(r_slice, z_slice, c=Bphi_slice, cmap="coolwarm", s=50)
+    axs[1].set_title(f"Toroidal $B_\\phi$ ({title_suffix})")
+    axs[1].set_xlabel("r"); axs[1].set_ylabel("z")
+    plt.colorbar(sc2, ax=axs[1])
+
+    sc3 = axs[2].scatter(r_slice, z_slice, c=Bz_slice, cmap="coolwarm", s=50)
+    axs[2].set_title(f"Vertical $B_z$ ({title_suffix})")
+    axs[2].set_xlabel("r"); axs[2].set_ylabel("z")
+    plt.colorbar(sc3, ax=axs[2])
+
+    plt.tight_layout()
+    plt.savefig(f"components_{filename_suffix}_gamma{int(gamma)}.png")
+    plt.show()
+
+plot_cross_section(phi0_mask, "φ ≈ 0", "phi_0")
+plot_cross_section(phi90_mask, "φ ≈ π/2", "phi_90")
